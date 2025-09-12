@@ -702,16 +702,65 @@ def merge_variables(variables, **kwargs):
 def _resample(y, new_sr, old_sr, new_num, kind='linear'):
     n = len(y)
     x = np.arange(n)
-    if new_sr < old_sr:
+    # Do not want to butterworth filter if signal is boxy
+    is_blocky = is_piecewise_constant(y)
+    if new_sr < old_sr and not is_blocky:
         # Downsampling, so filter the signal
         from scipy.signal import butter, filtfilt
+
         # cutoff = new Nyqist / old Nyquist
-        b, a = butter(5, (new_sr / 2.0) / (old_sr / 2.0),
-                    btype='low', output='ba', analog=False)
+        b, a = butter(
+            5, (new_sr / 2.0) / (old_sr / 2.0), btype='low', output='ba', analog=False
+        )
         y = filtfilt(b, a, y)
 
     from scipy.interpolate import interp1d
-    f = interp1d(x, y, kind=kind)
+
+    # Use nearest interpolation for blocky signals
+    interp_kind = 'nearest' if is_blocky else kind
+    f = interp1d(x, y, kind=interp_kind)
     x_new = np.linspace(0, n - 1, num=new_num)
 
     return f(x_new)
+
+
+def is_piecewise_constant(y, tol=1e-9, min_flat_fraction=0.7):
+    """
+    Detect if a 1D signal is truly piecewise constant
+    (i.e., flat regions with sharp jumps).
+    Used to avoid Butterworth filtering during resampling.
+
+    Parameters
+    ----------
+    y : array-like
+        Input signal.
+    tol : float
+        Tolerance for considering consecutive points "flat".
+    min_flat_fraction : float
+        Minimum fraction of the signal that must be exactly flat
+        for it to be considered boxy.
+
+    Returns
+    -------
+    bool
+        True if signal is likely piecewise constant, False otherwise.
+    """
+    y = np.asarray(y)
+    if y.size < 2:
+        return False  # too short to decide
+
+    # Compute discrete derivative
+    dy = np.diff(y)
+
+    # Flat regions: |dy| <= tol
+    flat_mask = np.abs(dy) <= tol
+    flat_fraction = np.sum(flat_mask) / len(dy)
+
+    # Require *majority* flat AND that the non-flat changes are sharp jumps
+    if flat_fraction >= min_flat_fraction:
+        # Look at the non-flat parts
+        jump_sizes = np.abs(dy[~flat_mask])
+        if jump_sizes.size > 0 and np.all(jump_sizes > 1e-3):
+            return True
+
+    return False
